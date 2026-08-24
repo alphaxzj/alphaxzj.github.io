@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <script>
+        (async () => {
+            const url = "https://github.com/Alvin9999-newpac/fanqiang/wiki/v2ray%E5%85%8D%E8%B4%B9%E8%B4%A6%E5%8F%B7";
+
+            const html = await fetch(url).then(r => r.text());
+
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+
+            let nodes = [];
+
+            // 获取所有 pre
+            document.querySelectorAll("pre").forEach(pre => {
+                // 去除HTML标签，只保留文本
+                let text = pre.textContent;
+
+                nodes.push(text);
+            });
+
+
+            // 合并
+            let content = nodes.join("\n");
+
+
+            // 提取节点
+            let result = content.match(
+                /(vmess|vless|ss):\/\/[A-Za-z0-9+/=_\-.:?&%]+/g
+            ) || [];
+
+
+            // 去重
+            result = [...new Set(result)];
+
+
+            // 过滤明显无效
+            result = result.filter(x => {
+
+                if (x.length < 20) return false;
+
+                if (
+                    x.includes("<") ||
+                    x.includes(">") ||
+                    x.includes("script")
+                ) {
+                    return false;
+                }
+
+                return true;
+            });
+
+
+            console.log(
+                `找到 ${result.length} 个节点`
+            );
+
+
+            console.log(
+                result.join("\n")
+            );
+
+
+            // 下载txt
+            let blob = new Blob(
+                [result.join("\n")],
+                {type: "text/plain"}
+            );
+
+            let a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "nodes.txt";
+            a.click();
+
+        })();
+    </script>
+</body>
+
+</html>
