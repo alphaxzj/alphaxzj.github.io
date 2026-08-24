@@ -81,8 +81,8 @@ jobs:
         run: |
 
           curl \
-          "http://127.0.0.1:25500/sub?target=clash&url=data:text/plain;base64,$(base64 -w0 nodes.txt)&insert=false&emoji=true&scv=true" \
-          -o clash.yaml
+          "http://127.0.0.1:25500/sub?target=clash&url=https://raw.githubusercontent.com/${{ github.repository }}/main/nodes.txt&insert=false&emoji=true&scv=true" \
+    -o clash.yaml
 
 
 
