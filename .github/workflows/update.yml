@@ -1,0 +1,79 @@
+name: Update VPN Nodes
+
+on:
+  schedule:
+    # 每6小时运行一次
+    - cron: "0 */6 * * *"
+
+  # 手动运行按钮
+  workflow_dispatch:
+
+
+jobs:
+  update-nodes:
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+
+    steps:
+
+      # 拉取仓库
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # 下载 Wiki 页面
+      - name: Download Wiki page
+        run: |
+
+          curl -L \
+          "https://raw.githubusercontent.com/wiki/Alvin9999-newpac/fanqiang/v2ray%E5%85%8D%E8%B4%B9%E8%B4%A6%E5%8F%B7.md" \
+          -o source.md
+
+
+
+      # 提取节点
+      - name: Extract nodes
+        run: |
+
+          grep -Eo \
+          '(vmess://|vless://|trojan://|ss://)[^ "<>]+' \
+          source.md \
+          | sed 's/[<>]//g' \
+          | sort -u \
+          > nodes.txt
+
+
+
+      # 显示数量
+      - name: Check nodes
+        run: |
+
+          echo "节点数量:"
+          wc -l nodes.txt
+
+          echo "前10个:"
+          head -10 nodes.txt
+
+
+
+      # 提交更新
+      - name: Commit changes
+        run: |
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add source.md nodes.txt
+
+
+          git commit \
+          -m "Auto update nodes $(date '+%Y-%m-%d %H:%M:%S')" \
+          || echo "No changes"
+
+
+          git push
