@@ -1,16 +1,14 @@
-name: Update VPN Nodes
+name: Update Clash Nodes
 
 on:
   schedule:
-    # 每6小时运行一次
     - cron: "0 */6 * * *"
 
-  # 手动运行按钮
   workflow_dispatch:
 
 
 jobs:
-  update-nodes:
+  update:
 
     runs-on: ubuntu-latest
 
@@ -21,12 +19,12 @@ jobs:
     steps:
 
       # 拉取仓库
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
 
-      # 下载 Wiki 页面
-      - name: Download Wiki page
+      # 下载节点页面
+      - name: Download Wiki
         run: |
 
           curl -L \
@@ -40,39 +38,78 @@ jobs:
         run: |
 
           grep -Eo \
-          '(vmess://|vless://|trojan://|ss://)[^ "<>]+' \
+          '(vmess|vless|trojan|ss|ssr|hysteria|hysteria2|tuic|anytls)://[^ "<>]+' \
           source.md \
-          | sed 's/[<>]//g' \
           | sort -u \
           > nodes.txt
 
 
 
-      # 显示数量
-      - name: Check nodes
+      # 下载 subconverter
+      - name: Install subconverter
+
+        run: |
+
+          wget -q \
+          https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz \
+          -O subconverter.tar.gz
+
+
+          tar -xzf subconverter.tar.gz
+
+
+          chmod +x subconverter/subconverter
+
+
+
+      # 启动 subconverter
+      - name: Start subconverter
+
+        run: |
+
+          nohup ./subconverter/subconverter \
+          > subconverter.log 2>&1 &
+
+
+          sleep 3
+
+
+
+      # 转换 Clash
+      - name: Convert Clash Config
+
+        run: |
+
+          curl \
+          "http://127.0.0.1:25500/sub?target=clash&url=data:text/plain;base64,$(base64 -w0 nodes.txt)&insert=false&emoji=true&scv=true" \
+          -o clash.yaml
+
+
+
+      # 检查
+      - name: Check output
+
         run: |
 
           echo "节点数量:"
-          wc -l nodes.txt
-
-          echo "前10个:"
-          head -10 nodes.txt
+          grep "name:" clash.yaml | wc -l
 
 
 
-      # 提交更新
-      - name: Commit changes
+      # 提交
+      - name: Commit
+
         run: |
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          git add source.md nodes.txt
+          git add .
 
 
           git commit \
-          -m "Auto update nodes $(date '+%Y-%m-%d %H:%M:%S')" \
+          -m "Update clash nodes" \
           || echo "No changes"
 
 
