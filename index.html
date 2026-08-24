@@ -965,8 +965,9 @@
         btnLabels.addEventListener('click', () => {
             state.showLabels = !state.showLabels;
             // 遍历所有行星标签
+            // 遍历所有行星，包括其子对象（月球等）
             planets.forEach((planet) => {
-                planet.children.forEach((child) => {
+                planet.traverse((child) => {
                     if (child.isCSS2DObject) {
                         child.visible = state.showLabels;
                     }
@@ -1078,7 +1079,7 @@
 
         // 确保所有CSS2DObject初始可见
         planets.forEach((planet) => {
-            planet.children.forEach((child) => {
+            planet.traverse((child) => {
                 if (child.isCSS2DObject) {
                     child.visible = state.showLabels;
                 }
