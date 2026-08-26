@@ -40,6 +40,7 @@ body {
 .app-shell {
   display: grid;
   grid-template-columns: minmax(330px, 420px) 1fr;
+  transition: grid-template-columns .22s ease;
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
@@ -253,6 +254,10 @@ button {
   min-width:58px;
   overflow:hidden;
 }
+
+.app-shell.sidebar-collapsed .brand { justify-content:center; gap:0; }
+.app-shell.sidebar-collapsed .header-actions { justify-content:center; }
+.app-shell.sidebar-collapsed .sidebar::-webkit-scrollbar { width:0; height:0; }
 
 .app-shell.sidebar-collapsed .side-block,
 .app-shell.sidebar-collapsed .member-panel,

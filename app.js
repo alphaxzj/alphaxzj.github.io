@@ -472,7 +472,9 @@ elements.mobileBackButton.addEventListener("click", function() {
 });
 
 elements.sidebarToggle.addEventListener("click", function() {
-  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed");
+  const shell = document.querySelector(".app-shell");
+  const collapsed = shell.classList.toggle("sidebar-collapsed");
+  shell.style.gridTemplateColumns = collapsed ? "58px 1fr" : "minmax(330px, 420px) 1fr";
 });
 
 function appendMember(name) {
