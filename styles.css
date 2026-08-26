@@ -142,6 +142,101 @@ button:focus-visible {
   gap: 18px;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(220px,1fr));
+  gap: 16px 20px;
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.field-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.security-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.security-chip {
+  padding: 8px 13px;
+  border-radius: 999px;
+  font-size: 13px;
+  background: rgba(255,107,122,.12);
+  color:#ffb4bc;
+}
+
+.security-chip.enabled {
+  background:#4fd1c51f;
+  color:var(--accent);
+}
+
+.secondary-button.compact {
+  width:auto;
+  min-width:132px;
+  margin-top:0;
+  padding:9px 14px;
+}
+
+.invitation-panel {
+  margin-top:22px;
+  padding:18px;
+  border:1px solid var(--line);
+  border-radius:15px;
+  background:rgba(10,21,34,.72);
+}
+
+.invitation-panel h3 {
+  margin:0 0 14px;
+  font-size:16px;
+}
+
+.invitation-list {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:12px;
+}
+
+.invitation-item {
+  padding:14px;
+  border-radius:11px;
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.04);
+  font-size:13.5px;
+}
+
+.invitation-title {
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:6px;
+}
+
+.invitation-state {
+  color:var(--muted);
+  font-size:12.5px;
+}
+
+.invitation-state.waiting { color:#ffe09a; }
+.invitation-state.connected { color:var(--accent); }
+
+.empty {
+  margin:0;
+  color:var(--muted);
+  font-size:13.5px;
+}
+
 .connect-card {
   min-width: 0;
   padding: 20px;
@@ -381,6 +476,8 @@ dialog ol {
 
 @media (max-width: 900px) {
   .connect-grid { grid-template-columns: 1fr; }
+  .settings-grid { grid-template-columns: 1fr; }
+  .security-row { align-items:flex-start; flex-direction:column; }
   .app-header { align-items: flex-start; flex-direction: column; }
 }
 
@@ -392,4 +489,6 @@ dialog ol {
   .composer { padding: 12px 14px; }
   .message-list li { max-width: 90%; }
   .member-panel { padding: 14px; }
+  .field-pair { grid-template-columns:1fr; }
+  .invitation-panel { padding:14px; }
 }

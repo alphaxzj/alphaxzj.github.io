@@ -1,25 +1,31 @@
 "use strict";
 
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:global.stun.twilio.com:3478" },
-];
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const MAX_MESSAGE_CACHE = 1500;
+const BASE_ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:global.stun.twilio.com:3478" }
+];
 
 const elements = {
   status: document.querySelector("#connectionStatus"),
   displayName: document.querySelector("#displayName"),
+  roomSecret: document.querySelector("#roomSecret"),
+  turnUrls: document.querySelector("#turnUrls"),
+  turnUsername: document.querySelector("#turnUsername"),
+  turnCredential: document.querySelector("#turnCredential"),
+  saveNetwork: document.querySelector("#saveNetworkButton"),
+  encryptionStatus: document.querySelector("#encryptionStatus"),
   createOffer: document.querySelector("#createOfferButton"),
   offerOutput: document.querySelector("#offerOutput"),
-  copyOffer: document.querySelector("#copyOfferButton"),
   offerInput: document.querySelector("#offerInput"),
   acceptOffer: document.querySelector("#acceptOfferButton"),
   answerOutput: document.querySelector("#answerOutput"),
-  copyAnswer: document.querySelector("#copyAnswerButton"),
   answerInput: document.querySelector("#answerInput"),
   completeConnection: document.querySelector("#completeConnectionButton"),
+  invitationList: document.querySelector("#invitationList"),
   memberCount: document.querySelector("#memberCountLabel"),
+  latencyLabel: document.querySelector("#latencyLabel"),
   memberList: document.querySelector("#memberList"),
   pendingConnections: document.querySelector("#pendingConnections"),
   disconnect: document.querySelector("#disconnectButton"),
@@ -30,10 +36,11 @@ const elements = {
 };
 
 const sessions = new Map();
-const activeOffers = new Map();
+const invitations = new Map();
 const seenMessages = new Set();
 let localIdentity = null;
 let heartbeatTimer = null;
+let cryptoKey = null;
 
 function randomId() {
   const bytes = new Uint8Array(8);
@@ -61,6 +68,113 @@ function ensureLocalIdentity() {
   return localIdentity;
 }
 
+async function deriveKey(secret) {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  return await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: new TextEncoder().encode("meshtalk-v3-room-salt"),
+      iterations: 210000,
+      hash: "SHA-256"
+    },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptJson(envelope) {
+  if (!cryptoKey) return envelope;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    cryptoKey,
+    new TextEncoder().encode(JSON.stringify(envelope))
+  ));
+  return {
+    encrypted: true,
+    iv: btoa(String.fromCharCode.apply(null, iv)),
+    data: btoa(String.fromCharCode.apply(null, cipher))
+  };
+}
+
+async function decryptJson(rawEnvelope) {
+  if (!rawEnvelope.encrypted) return rawEnvelope;
+  if (!cryptoKey) throw new Error("missing room key");
+  const iv = Uint8Array.from(atob(rawEnvelope.iv), function(char) { return char.charCodeAt(0); });
+  const data = Uint8Array.from(atob(rawEnvelope.data), function(char) { return char.charCodeAt(0); });
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, cryptoKey, data);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+function iceServers() {
+  const servers = BASE_ICE_SERVERS.slice();
+  const urls = safeText(elements.turnUrls.value, 300).trim();
+  if (urls) {
+    for (const url of urls.split(/[\s,]+/)) {
+      servers.push({
+        urls: url,
+        username: safeText(elements.turnUsername.value, 128),
+        credential: String(elements.turnCredential.value || "").slice(0, 256)
+      });
+    }
+  }
+  return servers;
+}
+
+function updateCryptoState() {
+  const secret = elements.roomSecret.value;
+  if (secret.length < 8) {
+    cryptoKey = null;
+    elements.encryptionStatus.textContent = "应用层加密未启用";
+    elements.encryptionStatus.className = "security-chip disabled";
+    return Promise.resolve(false);
+  }
+  return deriveKey(secret).then(function(key) {
+    const wasEnabled = Boolean(cryptoKey);
+    cryptoKey = key;
+    elements.encryptionStatus.textContent = "应用层 AES-256-GCM 已启用";
+    elements.encryptionStatus.className = "security-chip enabled";
+    if (!wasEnabled) appendMessage("system", null, "应用层端到端加密已启用。");
+    return true;
+  }).catch(function(error) {
+    cryptoKey = null;
+    elements.encryptionStatus.textContent = "密钥派生失败";
+    elements.encryptionStatus.className = "security-chip disabled";
+    appendMessage("error", null, "密钥派生失败：" + error.message);
+    return false;
+  });
+}
+
+function saveNetworkSettings() {
+  try {
+    localStorage.setItem("meshtalk.network", JSON.stringify({
+      turnUrls: safeText(elements.turnUrls.value, 300),
+      turnUsername: safeText(elements.turnUsername.value, 128),
+      turnCredential: String(elements.turnCredential.value || "").slice(0, 256)
+    }));
+    appendMessage("system", null, "网络设置已保存到本机浏览器。");
+  } catch {
+    appendMessage("error", null, "无法保存网络设置：浏览器存储不可用");
+  }
+}
+
+function loadNetworkSettings() {
+  try {
+    const settings = JSON.parse(localStorage.getItem("meshtalk.network") || "{}");
+    if (settings.turnUrls) elements.turnUrls.value = safeText(settings.turnUrls, 300);
+    if (settings.turnUsername) elements.turnUsername.value = safeText(settings.turnUsername, 128);
+    if (settings.turnCredential) elements.turnCredential.value = String(settings.turnCredential).slice(0, 256);
+  } catch {}
+}
+
 function setStatus(text, mode) {
   elements.status.textContent = text;
   elements.status.className = "status-chip " + mode;
@@ -72,32 +186,61 @@ function connectedSessions() {
   });
 }
 
+function refreshInvitations() {
+  elements.invitationList.innerHTML = "";
+  if (invitations.size === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "暂无记录。生成邀请码后会在这里按目标节点保存。";
+    elements.invitationList.append(empty);
+    return;
+  }
+  invitations.forEach(function(record, targetId) {
+    const item = document.createElement("div");
+    item.className = "invitation-item";
+    const title = document.createElement("div");
+    title.className = "invitation-title";
+    const name = document.createElement("strong");
+    name.textContent = record.name ? safeText(record.name, 24) : "节点 " + targetId.slice(0, 6);
+    const state = document.createElement("span");
+    state.className = "invitation-state " + record.state;
+    state.textContent = record.state === "connected" ? "已连接" :
+      record.state === "answered" ? "回复码待应用" : "等待对方回复码";
+    title.append(name, state);
+    item.append(title, document.createTextNode("目标：" + targetId.slice(0, 10)));
+    elements.invitationList.append(item);
+  });
+}
+
 function refreshInterface() {
   const connected = connectedSessions();
-  const connecting = sessions.size - connected.length;
   elements.memberCount.textContent = (connected.length + 1) + " 人";
 
+  elements.memberList.innerHTML = "";
+  appendMember(localIdentity.name + "（我）");
+  connected.forEach(function(session) {
+    appendMember(session.name + (session.latency == null ? "" : " · " + session.latency + "ms"));
+  });
+
   if (connected.length > 0) {
-    const averageLatency = Math.round(connected.reduce(function(total, session) {
-      return total + (session.latency || 0);
-    }, 0) / connected.length);
     setStatus("群聊中 · " + connected.length + " 个直连节点", "online");
-    elements.memberList.innerHTML = "";
-    appendMember(localIdentity.name + "（我）");
-    connected.forEach(function(session) {
-      appendMember(session.name);
-    });
   } else if (sessions.size > 0) {
-    setStatus("正在建立 " + sessions.size + " 条连接...", "connecting");
-    elements.memberList.innerHTML = "";
-    appendMember(localIdentity ? localIdentity.name + "（我，等待连接）" : "我（等待连接）");
+    setStatus("正在建立连接...", "connecting");
   } else {
     setStatus("离线", "offline");
-    elements.memberList.innerHTML = "";
-    appendMember(localIdentity ? localIdentity.name + "（我，未入网）" : "我（未入网）");
   }
 
-  elements.pendingConnections.classList.toggle("visible", sessions.size > 0);
+  const latencies = connected.filter(function(session) { return session.latency != null; });
+  if (latencies.length) {
+    const average = Math.round(latencies.reduce(function(total, session) {
+      return total + session.latency;
+    }, 0) / latencies.length);
+    elements.latencyLabel.textContent = average + " ms";
+  } else {
+    elements.latencyLabel.textContent = "— ms";
+  }
+
+  elements.pendingConnections.classList.toggle("visible", sessions.size > connected.length);
   elements.pendingConnections.innerHTML = "";
   sessions.forEach(function(session) {
     if (session.state !== "connected") {
@@ -112,6 +255,7 @@ function refreshInterface() {
   elements.messageInput.disabled = !enabled;
   elements.sendButton.disabled = !enabled;
   elements.disconnect.disabled = sessions.size === 0;
+  refreshInvitations();
 }
 
 function appendMember(name) {
@@ -119,7 +263,7 @@ function appendMember(name) {
   item.className = "member-item";
   const dot = document.createElement("span");
   dot.className = "member-dot";
-  item.append(dot, document.createTextNode(safeText(name, 30)));
+  item.append(dot, document.createTextNode(safeText(name, 42)));
   elements.memberList.append(item);
 }
 
@@ -149,7 +293,7 @@ async function compressedJson(payload) {
 }
 
 async function decompressedJson(base64) {
-  const normalized = safeText(base64, 200000).replace(/\s+/g, "");
+  const normalized = safeText(base64, 240000).replace(/\s+/g, "");
   const bytes = Uint8Array.from(atob(normalized), function(char) {
     return char.charCodeAt(0);
   });
@@ -160,7 +304,7 @@ async function decompressedJson(base64) {
 
 function createSession(targetId, role) {
   ensureLocalIdentity();
-  const connection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const connection = new RTCPeerConnection({ iceServers: iceServers() });
   const session = {
     targetId: targetId,
     role: role,
@@ -177,7 +321,7 @@ function createSession(targetId, role) {
   };
   connection.onconnectionstatechange = function() {
     if (connection.connectionState === "failed") {
-      appendMessage("error", null, "与节点 " + session.targetId.slice(0, 6) + " 的连接失败。");
+      appendMessage("error", null, "与节点 " + session.targetId.slice(0, 6) + " 连接失败。请检查网络，或在严格 NAT 环境配置 TURN。");
       closeSession(session);
     } else if (connection.connectionState === "closed") {
       closeSession(session);
@@ -193,7 +337,7 @@ function createSession(targetId, role) {
 async function waitForIceGathering(connection) {
   if (connection.iceGatheringState === "complete") return;
   await new Promise(function(resolve) {
-    const timeout = setTimeout(resolve, 2500);
+    const timeout = setTimeout(resolve, 3000);
     connection.addEventListener("icegatheringstatechange", function() {
       if (connection.iceGatheringState === "complete") {
         clearTimeout(timeout);
@@ -215,11 +359,11 @@ function bindChannel(session, channel) {
   });
 
   channel.addEventListener("message", function(event) {
-    try {
-      handleEnvelope(session, JSON.parse(event.data));
-    } catch {
-      appendMessage("error", null, "收到无法解析的数据包");
-    }
+    decryptJson(JSON.parse(event.data)).then(function(envelope) {
+      handleEnvelope(session, envelope);
+    }).catch(function() {
+      appendMessage("error", null, "收到无法解密或解析的数据包。请确认使用相同房间密钥。");
+    });
   });
 
   channel.addEventListener("close", function() {
@@ -234,23 +378,20 @@ function bindChannel(session, channel) {
 
 function closeSession(session) {
   if (!session || !sessions.has(session.targetId)) return;
-  if (session.channel) {
-    session.channel.onopen = session.channel.onmessage = session.channel.onclose = null;
-    if (session.channel.readyState !== "closed") session.channel.close();
-  }
-  if (session.connection) {
-    session.connection.onicecandidate = null;
-    session.connection.onconnectionstatechange = null;
-    session.connection.ondatachannel = null;
-    session.connection.close();
-  }
+  if (session.channel && session.channel.readyState !== "closed") session.channel.close();
+  session.connection.onicecandidate = null;
+  session.connection.onconnectionstatechange = null;
+  session.connection.ondatachannel = null;
+  session.connection.close();
   sessions.delete(session.targetId);
-  activeOffers.delete(session.targetId);
+  invitations.delete(session.targetId);
   refreshInterface();
 }
 
 function closeAllSessions() {
   Array.from(sessions.values()).forEach(closeSession);
+  invitations.clear();
+  refreshInterface();
 }
 
 function helloEnvelope() {
@@ -262,28 +403,30 @@ function helloEnvelope() {
 }
 
 function sendTo(session, envelope) {
-  if (!session.channel || session.channel.readyState !== "open") return false;
-  try {
-    session.channel.send(JSON.stringify(envelope));
+  if (!session.channel || session.channel.readyState !== "open") return Promise.resolve(false);
+  return encryptJson(envelope).then(function(protectedEnvelope) {
+    session.channel.send(JSON.stringify(protectedEnvelope));
     return true;
-  } catch {
+  }).catch(function() {
     return false;
-  }
+  });
 }
 
 function broadcast(envelope, excludeTargetId) {
-  let delivered = 0;
+  let hasTarget = false;
   sessions.forEach(function(session) {
-    if (session.targetId !== excludeTargetId && sendTo(session, envelope)) delivered += 1;
+    if (session.targetId !== excludeTargetId) {
+      hasTarget = true;
+      sendTo(session, envelope);
+    }
   });
-  return delivered;
+  return hasTarget;
 }
 
 function rememberMessage(messageId) {
   seenMessages.add(messageId);
   if (seenMessages.size > MAX_MESSAGE_CACHE) {
-    const oldest = seenMessages.values().next().value;
-    seenMessages.delete(oldest);
+    seenMessages.delete(seenMessages.values().next().value);
   }
 }
 
@@ -292,6 +435,11 @@ function handleEnvelope(session, envelope) {
 
   if (envelope.type === "hello") {
     session.name = safeText(envelope.senderName, 24) || "未知节点";
+    const invitation = invitations.get(session.targetId);
+    if (invitation && invitation.state !== "connected") {
+      invitation.name = session.name;
+      invitation.state = "connected";
+    }
     appendMessage("system", null, "节点身份确认：" + session.name);
     refreshInterface();
     return;
@@ -314,12 +462,9 @@ function handleEnvelope(session, envelope) {
     return;
   }
 
-  if (envelope.type === "pong") {
-    const sentAt = Number(envelope.at);
-    if (Number.isFinite(sentAt)) {
-      session.latency = Math.max(0, Date.now() - sentAt);
-      refreshInterface();
-    }
+  if (envelope.type === "pong" && Number.isFinite(Number(envelope.at))) {
+    session.latency = Math.max(0, Date.now() - Number(envelope.at));
+    refreshInterface();
     return;
   }
 
@@ -340,13 +485,14 @@ function startHeartbeat() {
 
 elements.createOffer.addEventListener("click", async function() {
   try {
+    ensureLocalIdentity();
     const targetId = randomId();
     const session = createSession(targetId, "initiator");
     bindChannel(session, session.connection.createDataChannel("meshtalk", { ordered: true }));
     const offer = await session.connection.createOffer();
     await session.connection.setLocalDescription(offer);
     await waitForIceGathering(session.connection);
-    const payload = {
+    const code = await compressedJson({
       v: PROTOCOL_VERSION,
       app: "meshtalk",
       group: true,
@@ -354,22 +500,25 @@ elements.createOffer.addEventListener("click", async function() {
       identity: localIdentity,
       sdp: session.connection.localDescription.sdp,
       candidates: session.candidates
-    };
-    elements.offerOutput.value = await compressedJson(payload);
-    activeOffers.set(targetId, session);
-    appendMessage("system", null, "新邀请码已生成（目标节点 " + targetId.slice(0, 6) + "）。请发送给对应成员。");
+    });
+    invitations.set(targetId, { name: "", state: "waiting" });
+    elements.offerOutput.value = code;
+    await copyValue(code, "邀请码", true);
+    refreshInterface();
   } catch (error) {
     appendMessage("error", null, "创建邀请码失败：" + error.message);
+    refreshInterface();
   }
 });
 
 elements.acceptOffer.addEventListener("click", async function() {
   try {
+    ensureLocalIdentity();
     const invitation = await decompressedJson(elements.offerInput.value);
     if (invitation.app !== "meshtalk" || !invitation.sdp || !invitation.targetId) {
       throw new Error("邀请码格式无效");
     }
-    if (invitation.targetId === localIdentity?.id) throw new Error("不能连接自己");
+    if (invitation.targetId === localIdentity.id) throw new Error("不能连接自己");
     if (sessions.has(invitation.targetId)) closeSession(sessions.get(invitation.targetId));
 
     const session = createSession(invitation.targetId, "responder");
@@ -386,7 +535,7 @@ elements.acceptOffer.addEventListener("click", async function() {
     const answer = await session.connection.createAnswer();
     await session.connection.setLocalDescription(answer);
     await waitForIceGathering(session.connection);
-    const payload = {
+    const replyCode = await compressedJson({
       v: PROTOCOL_VERSION,
       app: "meshtalk",
       group: true,
@@ -394,9 +543,9 @@ elements.acceptOffer.addEventListener("click", async function() {
       identity: localIdentity,
       sdp: session.connection.localDescription.sdp,
       candidates: session.candidates
-    };
-    elements.answerOutput.value = await compressedJson(payload);
-    appendMessage("system", null, "回复码已生成。请返回给邀请码创建者。");
+    });
+    elements.answerOutput.value = replyCode;
+    await copyValue(replyCode, "回复码", true);
   } catch (error) {
     appendMessage("error", null, "加入房间失败：" + error.message);
   }
@@ -406,55 +555,57 @@ elements.completeConnection.addEventListener("click", async function() {
   try {
     const reply = await decompressedJson(elements.answerInput.value);
     if (reply.app !== "meshtalk" || !reply.sdp || !reply.targetId) throw new Error("回复码格式无效");
-    const session = activeOffers.get(reply.targetId);
-    if (!session) throw new Error("找不到对应的邀请记录；请重新生成并交换邀请码");
-    if (reply.identity) session.name = safeText(reply.identity.name, 24) || "未知节点";
+    const session = sessions.get(reply.targetId);
+    if (!session || session.role !== "initiator") throw new Error("找不到对应邀请；请重新生成并交换邀请码");
+    if (reply.identity) {
+      session.name = safeText(reply.identity.name, 24) || "未知节点";
+      const invitation = invitations.get(reply.targetId);
+      if (invitation) invitation.name = session.name;
+    }
     await session.connection.setRemoteDescription({ type: "answer", sdp: reply.sdp });
     for (const candidate of reply.candidates || []) {
       await session.connection.addIceCandidate(candidate).catch(function() {});
     }
-    activeOffers.delete(reply.targetId);
+    const invitation = invitations.get(reply.targetId);
+    if (invitation) invitation.state = "answered";
+    elements.answerInput.value = "";
     appendMessage("system", null, "回复码已应用，正在握手。");
+    refreshInterface();
   } catch (error) {
     appendMessage("error", null, "连接失败：" + error.message);
   }
 });
 
-async function copyText(source, label) {
-  const value = source.value.trim();
+async function copyValue(value, label, quietWhenEmpty) {
   if (!value) {
-    appendMessage("system", null, label + "还没有生成");
-    return;
+    if (!quietWhenEmpty) appendMessage("system", null, label + "还没有生成");
+    return false;
   }
   try {
     await navigator.clipboard.writeText(value);
-    appendMessage("system", null, label + "已复制");
+    appendMessage("system", null, label + "已自动复制到剪贴板。");
+    return true;
   } catch {
-    source.select();
-    appendMessage("system", null, "请按 Ctrl+C 手动复制");
+    appendMessage("system", null, label + "已显示在文本框中，请手动复制。");
+    return false;
   }
 }
 
-elements.copyOffer.addEventListener("click", function() {
-  copyText(elements.offerOutput, "最新邀请码");
-});
-elements.copyAnswer.addEventListener("click", function() {
-  copyText(elements.answerOutput, "最新回复码");
-});
+elements.saveNetwork.addEventListener("click", saveNetworkSettings);
+elements.roomSecret.addEventListener("input", updateCryptoState);
 
-elements.messageForm.addEventListener("submit", function(event) {
+elements.messageForm.addEventListener("submit", async function(event) {
   event.preventDefault();
   const text = elements.messageInput.value.replace(/\s+$/u, "").trim();
   if (!text || connectedSessions().length === 0) return;
-  const envelope = {
+  const delivered = broadcast({
     type: "chat",
     messageId: randomId(),
     senderId: localIdentity.id,
     senderName: localIdentity.name,
     text: text
-  };
-  const delivered = broadcast(envelope, null);
-  if (delivered === 0) return;
+  }, null);
+  if (!delivered) return;
   appendMessage("self", localIdentity.name + "（我）", text);
   elements.messageInput.value = "";
   elements.messageInput.focus();
@@ -463,7 +614,6 @@ elements.messageForm.addEventListener("submit", function(event) {
 elements.disconnect.addEventListener("click", function() {
   broadcast({ type: "bye" }, null);
   closeAllSessions();
-  activeOffers.clear();
   appendMessage("system", null, "你已断开所有群聊连接。");
 });
 
@@ -485,6 +635,7 @@ window.addEventListener("beforeunload", function() {
 });
 
 ensureLocalIdentity();
+loadNetworkSettings();
 startHeartbeat();
 refreshInterface();
-appendMessage("system", null, "欢迎来到 MeshTalk 群聊。可连续生成多条邀请码，分别邀请不同成员。");
+appendMessage("system", null, "欢迎来到 MeshTalk。建议先设置相同的房间密钥，再交换邀请码。");
