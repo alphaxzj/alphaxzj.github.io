@@ -338,6 +338,19 @@ button {
 
 .remote .bubble { border-bottom-left-radius:4px; }
 
+.receipt {
+  margin-left:5px;
+  color:#8a94a6;
+  font-size:11px;
+}
+
+.receipt.read { color:var(--success); font-weight:700; }
+
+.typing {
+  color:var(--accent-dark);
+  font-size:12px;
+}
+
 .file-bubble { min-width:190px; }
 
 .file-name {
@@ -495,8 +508,48 @@ details[open] summary { border-bottom:1px solid var(--line); margin-bottom:14px;
 @media (max-width:900px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, .95fr) minmax(0, 1.05fr);
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr);
   }
+  .sidebar,
+  .chat-panel {
+    grid-area: 1 / 1;
+    min-height: 0;
+    height: 100dvh;
+    overflow: hidden;
+    display: none;
+  }
+  .app-shell.show-sidebar .sidebar { display: flex; }
+  .app-shell.show-chat .chat-panel {
+    display: grid;
+    grid-template-rows: auto minmax(0,1fr) auto;
+  }
+  .mobile-only { display: inline-grid; place-items: center; }
+}
+
+.mobile-only { display: none; }
+
+@media (max-width:520px) {
+  .message-list li { max-width:87%; }
+  .composer { padding:9px 11px; gap:7px; }
+  #messageInput { height:42px; font-size:16px; }
+  #sendButton { width:42px; height:42px; }
+  #attachButton,#emojiButton { width:37px; height:37px; }
+  .emoji-panel {
+    right:10px;
+    left:10px;
+    width:auto;
+    bottom:68px;
+    grid-template-columns:repeat(6,1fr);
+  }
+  .chat-header { padding-top:8px; padding-bottom:8px; }
+  .chat-title h1 { font-size:15px; }
+  .chat-title p { font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .icon-button.wide,.icon-button.danger { height:32px; padding:0 10px; }
+  .side-block,.member-panel { padding-left:12px; padding-right:12px; }
+  .field-pair { grid-template-columns:1fr; }
+  textarea { min-height:64px; }
+}
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   .chat-panel { border-top: 0; }
 }

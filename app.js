@@ -9,6 +9,7 @@ const MAX_FILE_SIZE = 12 * 1024 * 1024;
 const FILE_CHUNK_SIZE = 48 * 1024;
 const CHUNK_ACK_INTERVAL = 8;
 const CHUNK_RETRY_LIMIT = 5;
+const TYPING_TIMEOUT_MS = 3000;
 const BASE_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" }
@@ -55,7 +56,8 @@ const elements = {
   emojiButton: document.querySelector("#emojiButton"),
   emojiPanel: document.querySelector("#emojiPanel"),
   attachButton: document.querySelector("#attachButton"),
-  fileInput: document.querySelector("#fileInput")
+  fileInput: document.querySelector("#fileInput"),
+  mobileBackButton: document.querySelector("#mobileBackButton")
 };
 
 elements.historyButton = document.querySelector("#historyButton");
@@ -69,6 +71,8 @@ const invitations = new Map();
 const seenMessages = new Set();
 const incomingFiles = new Map();
 const outgoingFiles = new Map();
+const messageReceipts = new Map();
+const typingPeers = new Set();
 
 elements.linkNote = document.createElement("p");
 elements.linkNote.className = "link-note hidden";
@@ -442,8 +446,20 @@ function refreshInterface() {
   elements.messageInput.disabled = !enabled;
   elements.sendButton.disabled = !enabled;
   elements.disconnect.disabled = sessions.size === 0;
+  const mobileView = window.matchMedia("(max-width:900px)");
+  const shell = document.querySelector(".app-shell");
+  if (mobileView.matches) {
+    shell.classList.add("show-sidebar");
+    if (enabled) shell.classList.add("show-chat");
+  }
   refreshInvitations();
 }
+
+elements.mobileBackButton.addEventListener("click", function() {
+  const shell = document.querySelector(".app-shell");
+  shell.classList.remove("show-chat");
+  shell.classList.add("show-sidebar");
+});
 
 function appendMember(name) {
   const item = document.createElement("li");
@@ -458,6 +474,7 @@ function appendMessage(kind, sender, body) {
   if (kind === "self" || kind === "remote") saveHistory(kind, sender, body);
   const shouldStick = elements.messageList.scrollHeight - elements.messageList.scrollTop - elements.messageList.clientHeight < 120;
   const currentId = kind === "self" ? appendMessage.currentId : "";
+  let receipt = null;
   const item = document.createElement("li");
   if (kind === "system" || kind === "error") {
     item.className = kind + "-message";
@@ -470,7 +487,6 @@ function appendMessage(kind, sender, body) {
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.textContent = body;
-    let receipt = null;
     if (kind === "self") {
       receipt = document.createElement("span");
       receipt.className = "receipt";
@@ -503,8 +519,36 @@ function updateReceipt(messageId, state) {
 
 function observeOutgoingReceipt(element, messageId) {
   requestAnimationFrame(function() {
-    sendReadReceiptIfNeeded(element, messageId);
+    if (isElementVisible(element)) sendReadReceipt(messageId);
+    else setTimeout(function() { observeOutgoingReceipt(element, messageId); }, 500);
   });
+}
+
+function isElementVisible(element) {
+  const rect = element.getBoundingClientRect();
+  return rect.top < window.innerHeight && rect.bottom > 0;
+}
+
+function sendReadReceipt(messageId) {
+  broadcast({ type: "message-read", messageId }, null);
+}
+
+function updateTypingIndicator() {
+  const header = document.querySelector(".chat-title p");
+  let indicator = document.querySelector("#typingIndicator");
+  if (!typingPeers.size) {
+    if (indicator) indicator.remove();
+    return;
+  }
+  const names = Array.from(typingPeers).slice(0, 2).join("、");
+  const text = typingPeers.size > 2 ? names + " 等正在输入..." : names + " 正在输入...";
+  if (!indicator) {
+    indicator = document.createElement("span");
+    indicator.id = "typingIndicator";
+    indicator.className = "typing";
+    header.append(document.createTextNode(" · "), indicator);
+  }
+  indicator.textContent = text;
 }
 
 function appendMessageTo(target, kind, sender, body) {
@@ -691,10 +735,30 @@ function handleEnvelope(session, envelope) {
     const messageId = safeText(envelope.messageId, 64);
     if (!messageId || seenMessages.has(messageId)) return;
     rememberMessage(messageId);
+    sendTo(session, { type: "message-delivered", messageId });
     const senderName = safeText(envelope.senderName, 24) || "未知节点";
     const text = safeText(envelope.text, 2000);
     if (!text) return;
     appendMessage("remote", senderName, text);
+    broadcast(envelope, session.targetId);
+    return;
+  }
+
+  if (envelope.type === "message-delivered") {
+    updateReceipt(safeText(envelope.messageId, 64), "delivered");
+    return;
+  }
+
+  if (envelope.type === "message-read") {
+    const messageId = safeText(envelope.messageId, 64);
+    updateReceipt(messageId, "read");
+    return;
+  }
+
+  if (envelope.type === "typing") {
+    const name = safeText(envelope.senderName, 24) || session.name;
+    if (envelope.active) typingPeers.add(name); else typingPeers.delete(name);
+    updateTypingIndicator();
     broadcast(envelope, session.targetId);
     return;
   }
@@ -1235,8 +1299,32 @@ elements.messageForm.addEventListener("submit", async function(event) {
     text: text
   }, null);
   if (!delivered) return;
+  appendMessage.currentId = envelopeMessageId;
   appendMessage("self", localIdentity.name + "（我）", text);
   elements.messageInput.value = "";
+});
+
+let typingTimer = null;
+let typingActive = false;
+elements.messageInput.addEventListener("input", function() {
+  if (!connectedSessions().length) return;
+  broadcast({ type: "typing", senderName: localIdentity.name, active: true }, null);
+  typingActive = true;
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(function() {
+    if (typingActive) {
+      broadcast({ type: "typing", senderName: localIdentity.name, active: false }, null);
+      typingActive = false;
+    }
+  }, TYPING_TIMEOUT_MS);
+});
+
+elements.messageForm.addEventListener("submit", function() {
+  if (typingActive) {
+    broadcast({ type: "typing", senderName: localIdentity?.name, active: false }, null);
+    typingActive = false;
+    clearTimeout(typingTimer);
+  }
 });
 
 elements.disconnect.addEventListener("click", function() {
