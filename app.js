@@ -1080,7 +1080,9 @@ elements.completeConnection.addEventListener("click", async function() {
 elements.createBatch.addEventListener("click", async function() {
   try {
     ensureLocalIdentity();
-    if (!elements.roomSecret.value || cryptoKey) await updateCryptoState();
+    if (elements.roomSecret.value.trim().length >= 8 && !cryptoKey) {
+      await updateCryptoState();
+    }
     const seats = Math.max(1, Math.min(8, Number(elements.batchSeats.value) || 3));
     const offers = [];
     for (let index = 0; index < seats; index += 1) {
