@@ -5,6 +5,10 @@ const MAX_MESSAGE_CACHE = 1500;
 const SEND_LIMIT = { count: 8, windowMs: 10000 };
 const RECEIVE_LIMIT = { count: 30, windowMs: 10000 };
 const MAX_DIRECT_SESSIONS = 12;
+const MAX_FILE_SIZE = 12 * 1024 * 1024;
+const FILE_CHUNK_SIZE = 48 * 1024;
+const CHUNK_ACK_INTERVAL = 8;
+const CHUNK_RETRY_LIMIT = 5;
 const BASE_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" }
@@ -26,6 +30,18 @@ const elements = {
   answerOutput: document.querySelector("#answerOutput"),
   answerInput: document.querySelector("#answerInput"),
   completeConnection: document.querySelector("#completeConnectionButton"),
+  batchSeats: document.querySelector("#batchSeats"),
+  createBatch: document.querySelector("#createBatchButton"),
+  batchOfferOutput: document.querySelector("#batchOfferOutput"),
+  copyBatchOffer: document.querySelector("#copyBatchOfferButton"),
+  batchOfferInput: document.querySelector("#batchOfferInput"),
+  acceptBatch: document.querySelector("#acceptBatchButton"),
+  batchSeatNumber: document.querySelector("#batchSeatNumber"),
+  batchAnswerOutput: document.querySelector("#batchAnswerOutput"),
+  copyBatchAnswer: document.querySelector("#copyBatchAnswerButton"),
+  batchAnswerInput: document.querySelector("#batchAnswerInput"),
+  completeBatch: document.querySelector("#completeBatchButton"),
+  copyBatchLink: document.querySelector("#copyBatchLinkButton"),
   invitationList: document.querySelector("#invitationList"),
   memberCount: document.querySelector("#memberCountLabel"),
   latencyLabel: document.querySelector("#latencyLabel"),
@@ -35,7 +51,11 @@ const elements = {
   messageList: document.querySelector("#messageList"),
   messageForm: document.querySelector("#messageForm"),
   messageInput: document.querySelector("#messageInput"),
-  sendButton: document.querySelector("#sendButton")
+  sendButton: document.querySelector("#sendButton"),
+  emojiButton: document.querySelector("#emojiButton"),
+  emojiPanel: document.querySelector("#emojiPanel"),
+  attachButton: document.querySelector("#attachButton"),
+  fileInput: document.querySelector("#fileInput")
 };
 
 elements.historyButton = document.querySelector("#historyButton");
@@ -47,6 +67,13 @@ elements.clearHistory = document.querySelector("#clearHistoryButton");
 const sessions = new Map();
 const invitations = new Map();
 const seenMessages = new Set();
+const incomingFiles = new Map();
+const outgoingFiles = new Map();
+
+elements.linkNote = document.createElement("p");
+elements.linkNote.className = "link-note hidden";
+elements.linkNote.textContent = "邀请链接已生成。成员打开链接后选择自己的名额编号即可。";
+elements.copyBatchLink.insertAdjacentElement("afterend", elements.linkNote);
 let localIdentity = null;
 let heartbeatTimer = null;
 let cryptoKey = null;
@@ -429,6 +456,8 @@ function appendMember(name) {
 
 function appendMessage(kind, sender, body) {
   if (kind === "self" || kind === "remote") saveHistory(kind, sender, body);
+  const shouldStick = elements.messageList.scrollHeight - elements.messageList.scrollTop - elements.messageList.clientHeight < 120;
+  const currentId = kind === "self" ? appendMessage.currentId : "";
   const item = document.createElement("li");
   if (kind === "system" || kind === "error") {
     item.className = kind + "-message";
@@ -441,10 +470,41 @@ function appendMessage(kind, sender, body) {
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.textContent = body;
+    let receipt = null;
+    if (kind === "self") {
+      receipt = document.createElement("span");
+      receipt.className = "receipt";
+      receipt.textContent = "✓";
+      meta.append(receipt);
+    }
     item.append(meta, bubble);
   }
   elements.messageList.append(item);
-  elements.messageList.scrollTop = elements.messageList.scrollHeight;
+  if (shouldStick || kind === "self") {
+    elements.messageList.scrollTop = elements.messageList.scrollHeight;
+  }
+  if (receipt && currentId) {
+    messageReceipts.set(currentId, { element: receipt, delivered: false, read: false });
+    observeOutgoingReceipt(item, currentId);
+    appendMessage.currentId = "";
+  }
+}
+
+function updateReceipt(messageId, state) {
+  const record = messageReceipts.get(messageId);
+  if (!record) return;
+  if (state === "read") {
+    record.element.textContent = "✓✓ 已读";
+    record.element.classList.add("read");
+  } else if (!record.delivered) {
+    record.element.textContent = "✓✓";
+  }
+}
+
+function observeOutgoingReceipt(element, messageId) {
+  requestAnimationFrame(function() {
+    sendReadReceiptIfNeeded(element, messageId);
+  });
 }
 
 function appendMessageTo(target, kind, sender, body) {
@@ -654,6 +714,201 @@ function handleEnvelope(session, envelope) {
     appendMessage("system", null, "节点 " + session.name + " 已主动退出。");
     closeSession(session);
   }
+  if (envelope.type === "file-start") {
+    const transferId = safeText(envelope.transferId, 64);
+    const size = Number(envelope.size);
+    const chunks = Number(envelope.chunks);
+    if (!transferId || !Number.isFinite(size) || size < 1 || size > MAX_FILE_SIZE || !Number.isFinite(chunks)) return;
+    rememberMessage(safeText(envelope.messageId, 64));
+    incomingFiles.set(transferId, {
+      name: safeText(envelope.fileName, 120),
+      type: safeText(envelope.fileType, 100),
+      size,
+      received: 0,
+      chunks: [],
+      senderName: safeText(envelope.senderName, 24),
+      session,
+      chunkSet: new Set(),
+      view: createFileBubble("remote", safeText(envelope.senderName, 24), { name: envelope.fileName, size })
+    });
+    return;
+  }
+
+  if (envelope.type === "file-chunk") {
+    receiveFileChunk(envelope);
+    return;
+  }
+
+  if (envelope.type === "file-end") {
+    completeIncomingFile(envelope);
+    return;
+  }
+
+  if (envelope.type === "file-chunk-ack") {
+    const state = outgoingFiles.get(safeText(envelope.transferId, 64));
+    const through = Number(envelope.through);
+    if (state && Number.isFinite(through)) state.receivedAcks.add(through);
+    return;
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1024 / 1024).toFixed(2) + " MB";
+}
+
+function createFileBubble(kind, sender, file) {
+  const item = document.createElement("li");
+  item.className = kind;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = sender + " · " + new Date().toLocaleTimeString("zh-CN");
+  const bubble = document.createElement("div");
+  bubble.className = "bubble file-bubble";
+  const name = document.createElement("span");
+  name.className = "file-name";
+  name.textContent = safeText(file.name || "文件", 120);
+  const size = document.createElement("span");
+  size.className = "file-size";
+  size.textContent = formatBytes(Number(file.size) || 0);
+  const track = document.createElement("div");
+  track.className = "progress-track";
+  const bar = document.createElement("div");
+  bar.className = "progress-bar";
+  track.append(bar);
+  bubble.append(name, size, track);
+  item.append(meta, bubble);
+  elements.messageList.append(item);
+  elements.messageList.scrollTop = elements.messageList.scrollHeight;
+  return { item, bubble, bar };
+}
+
+async function appendCompletedFile(kind, sender, file, blob) {
+  const isImage = String(file.type || "").startsWith("image/");
+  const view = createFileBubble(kind, sender, { name: file.name, size: file.size });
+  view.bubble.querySelector(".progress-track").remove();
+  const url = URL.createObjectURL(blob);
+  if (isImage) {
+    const image = document.createElement("img");
+    image.className = "file-preview";
+    image.src = url;
+    image.alt = safeText(file.name, 80);
+    image.addEventListener("click", function() { window.open(url, "_blank"); });
+    view.bubble.prepend(image);
+  } else {
+    const link = document.createElement("a");
+    link.className = "download-link";
+    link.href = url;
+    link.download = safeText(file.name, 120);
+    link.textContent = "下载文件";
+    view.bubble.append(link);
+  }
+  saveHistory(kind, sender, "[文件] " + safeText(file.name, 80));
+}
+
+async function sendFile(file) {
+  ensureLocalIdentity();
+  if (!file || !connectedSessions().length) return;
+  if (file.size > MAX_FILE_SIZE) {
+    appendMessage("error", null, "文件大小不能超过 12MB。");
+    return;
+  }
+  const transferId = randomId() + randomId();
+  const fileId = randomId() + randomId();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const chunks = Math.ceil(bytes.length / FILE_CHUNK_SIZE) || 1;
+  outgoingFiles.set(transferId, { bytes, size: bytes.length, receivedAcks: new Set() });
+  const progress = createFileBubble("self", localIdentity.name + "（我）", file);
+  broadcast({
+    type: "file-start",
+    messageId: fileId,
+    senderName: localIdentity.name,
+    transferId,
+    fileName: safeText(file.name, 120),
+    fileType: safeText(file.type, 100),
+    size: bytes.length,
+    chunks
+  }, null);
+  for (let index = 0; index < chunks; index += 1) {
+    const start = index * FILE_CHUNK_SIZE;
+    const chunk = bytes.slice(start, Math.min(start + FILE_CHUNK_SIZE, bytes.length));
+    let binary = "";
+    for (const byte of chunk) binary += String.fromCharCode(byte);
+    await broadcastAsync({ type: "file-chunk", transferId, index, data: btoa(binary) });
+    if ((index + 1) % CHUNK_ACK_INTERVAL === 0 || index === chunks - 1) {
+      await waitUntilBufferDrained();
+      await waitForChunkAcks(transferId, Math.min(index + 1, chunks));
+    }
+    progress.bar.style.width = Math.round(((index + 1) / chunks) * 100) + "%";
+    await new Promise(function(resolve) { setTimeout(resolve, 8); });
+  }
+  await broadcastAsync({ type: "file-end", transferId });
+  const blob = new Blob([bytes], { type: safeText(file.type, 100) || "application/octet-stream" });
+  await appendCompletedFile("self", localIdentity.name + "（我）", file, blob);
+}
+
+async function waitUntilBufferDrained() {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    let buffered = false;
+    sessions.forEach(function(session) {
+      if (session.channel && session.channel.bufferedAmount > 2 * 1024 * 1024) buffered = true;
+    });
+    if (!buffered) return true;
+    await new Promise(function(resolve) { setTimeout(resolve, 40); });
+  }
+  return false;
+}
+
+async function waitForChunkAcks(transferId, expectedCount) {
+  for (let attempt = 0; attempt < CHUNK_RETRY_LIMIT; attempt += 1) {
+    const state = outgoingFiles.get(transferId);
+    if (!state) return false;
+    const missing = [];
+    for (let number = state.highestAck + 1; number <= expectedCount; number += 1) {
+      if (!state.receivedAcks.has(number)) missing.push(number - 1);
+    }
+    if (!missing.length) return true;
+    if (attempt === CHUNK_RETRY_LIMIT - 1) throw new Error("文件传输确认超时");
+    for (const chunkIndex of missing) {
+      const start = chunkIndex * FILE_CHUNK_SIZE;
+      const chunk = state.bytes.slice(start, Math.min(start + FILE_CHUNK_SIZE, state.size));
+      let binary = "";
+      for (const byte of chunk) binary += String.fromCharCode(byte);
+      await broadcastAsync({ type: "file-chunk", transferId, index: chunkIndex, data: btoa(binary), resend: true });
+    }
+    await broadcastAsync({ type: "file-chunk-query", transferId });
+    await new Promise(function(resolve) { setTimeout(resolve, 700); });
+  }
+  return false;
+}
+
+function broadcastAsync(envelope) {
+  const jobs = [];
+  sessions.forEach(function(session) { jobs.push(sendTo(session, envelope)); });
+  return Promise.all(jobs).then(function() {});
+}
+
+async function receiveFileChunk(envelope) {
+  const state = incomingFiles.get(envelope.transferId);
+  if (!state || !Number.isInteger(Number(envelope.index))) return;
+  const chunkIndex = Number(envelope.index);
+  if (state.chunkSet.has(chunkIndex)) return;
+  const chunk = Uint8Array.from(atob(String(envelope.data || "")), function(char) { return char.charCodeAt(0); });
+  state.chunks[chunkIndex] = chunk;
+  state.chunkSet.add(chunkIndex);
+  state.received += chunk.byteLength;
+  state.view.bar.style.width = Math.min(100, Math.round(state.received / state.size * 100)) + "%";
+  sendTo(state.session, { type: "file-chunk-ack", transferId: envelope.transferId, through: chunkIndex });
+}
+
+async function completeIncomingFile(envelope) {
+  const state = incomingFiles.get(envelope.transferId);
+  if (!state) return;
+  incomingFiles.delete(envelope.transferId);
+  state.view.bar.closest(".progress-track").remove();
+  const blob = new Blob(state.chunks, { type: state.type || "application/octet-stream" });
+  await appendCompletedFile("remote", state.senderName, { name: state.name, size: state.size, type: state.type }, blob);
 }
 
 function startHeartbeat() {
@@ -758,6 +1013,155 @@ elements.completeConnection.addEventListener("click", async function() {
   }
 });
 
+elements.createBatch.addEventListener("click", async function() {
+  try {
+    ensureLocalIdentity();
+    if (!elements.roomSecret.value || cryptoKey) await updateCryptoState();
+    const seats = Math.max(1, Math.min(8, Number(elements.batchSeats.value) || 3));
+    const offers = [];
+    for (let index = 0; index < seats; index += 1) {
+      if (sessions.size >= MAX_DIRECT_SESSIONS) throw new Error("已达最大连接数量");
+      const targetId = randomId();
+      const session = createSession(targetId, "initiator");
+      bindChannel(session, session.connection.createDataChannel("meshtalk", { ordered: true }));
+      const offer = await session.connection.createOffer();
+      await session.connection.setLocalDescription(offer);
+      await waitForIceGathering(session.connection);
+      offers.push({
+        targetId,
+        identity: localIdentity,
+        sdp: session.connection.localDescription.sdp,
+        candidates: session.candidates
+      });
+      invitations.set(targetId, { name: "", state: "waiting" });
+    }
+    const packageCode = await compressedJson({
+      v: PROTOCOL_VERSION,
+      app: "meshtalk-batch",
+      hostId: localIdentity.id,
+      offers
+    });
+    elements.linkNote.classList.add("hidden");
+    elements.batchOfferOutput.value = packageCode;
+    await copyValue(packageCode, "批量邀请包", true);
+    try {
+      sessionStorage.setItem("meshtalk.lastInvite", packageCode);
+    } catch {}
+    refreshInterface();
+  } catch (error) {
+    appendMessage("error", null, "生成批量邀请包失败：" + error.message);
+    refreshInterface();
+  }
+});
+
+elements.acceptBatch.addEventListener("click", async function() {
+  try {
+    ensureLocalIdentity();
+    const invitationPackage = await decompressedJson(elements.batchOfferInput.value);
+    if (invitationPackage.app !== "meshtalk-batch" || !Array.isArray(invitationPackage.offers) || !invitationPackage.offers.length) {
+      throw new Error("邀请包格式无效");
+    }
+    const seatTotal = invitationPackage.offers.length;
+    const seatNumber = Math.max(1, Math.min(seatTotal, Number(elements.batchSeatNumber.value) || 1));
+    const offer = invitationPackage.offers[seatNumber - 1];
+    const answers = [];
+    {
+      if (!offer.sdp || !offer.targetId) throw new Error("所选名额无效");
+      if (sessions.has(offer.targetId)) throw new Error("该名额已在本页处理");
+      const session = createSession(offer.targetId, "responder");
+      if (offer.identity && offer.identity.id !== localIdentity.id) {
+        session.name = safeText(offer.identity.name, 24) || "未知节点";
+      }
+      session.connection.ondatachannel = function(event) {
+        bindChannel(session, event.channel);
+      };
+      await session.connection.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      for (const candidate of offer.candidates || []) {
+        await session.connection.addIceCandidate(candidate).catch(function() {});
+      }
+      const answer = await session.connection.createAnswer();
+      await session.connection.setLocalDescription(answer);
+      await waitForIceGathering(session.connection);
+      answers.push({
+        targetId: offer.targetId,
+        identity: localIdentity,
+        sdp: session.connection.localDescription.sdp,
+        candidates: session.candidates
+      });
+    }
+    if (!answers.length) throw new Error("邀请包中没有可用名额");
+    elements.batchAnswerOutput.value = await compressedJson({
+      v: PROTOCOL_VERSION,
+      app: "meshtalk-batch",
+      responderId: localIdentity.id,
+      answers
+    });
+    await copyValue(elements.batchAnswerOutput.value, "回复包", true);
+  } catch (error) {
+    appendMessage("error", null, "加入房间失败：" + error.message);
+  }
+});
+
+elements.completeBatch.addEventListener("click", async function() {
+  try {
+    let applied = 0;
+    const packageCodes = elements.batchAnswerInput.value.split(/\s+/).filter(Boolean);
+    if (!packageCodes.length) throw new Error("请先粘贴成员回复包");
+    for (const packageCode of packageCodes) {
+      const parsed = await decompressedJson(packageCode);
+      if (parsed.app !== "meshtalk-batch" || !Array.isArray(parsed.answers)) continue;
+      for (const reply of parsed.answers) {
+        const session = sessions.get(reply.targetId);
+        if (!session || session.role !== "initiator") continue;
+        if (reply.identity) {
+          session.name = safeText(reply.identity.name, 24) || "未知节点";
+          const invitation = invitations.get(reply.targetId);
+          if (invitation) invitation.name = session.name;
+        }
+        await session.connection.setRemoteDescription({ type: "answer", sdp: reply.sdp });
+        for (const candidate of reply.candidates || []) {
+          await session.connection.addIceCandidate(candidate).catch(function() {});
+        }
+        const invitation = invitations.get(reply.targetId);
+        if (invitation) invitation.state = "answered";
+        applied += 1;
+      }
+    }
+    elements.batchAnswerInput.value = "";
+    appendMessage("system", null, "已应用 " + applied + " 条回复码，正在握手。");
+    refreshInterface();
+  } catch (error) {
+    appendMessage("error", null, "批量连接失败：" + error.message);
+  }
+});
+
+elements.copyBatchOffer.addEventListener("click", async function() {
+  await copyValue(elements.batchOfferOutput.value, "邀请包");
+});
+elements.copyBatchAnswer.addEventListener("click", async function() {
+  await copyValue(elements.batchAnswerOutput.value, "回复包");
+});
+
+elements.copyBatchLink.addEventListener("click", async function() {
+  const code = elements.batchOfferOutput.value.trim();
+  if (!code) {
+    appendMessage("system", null, "请先生成批量邀请包");
+    return;
+  }
+  const link = location.origin + location.pathname + "#invite=" + encodeURIComponent(code);
+  await copyValue(link, "邀请链接", true);
+});
+
+(async function restoreInviteFromUrl() {
+  if (!location.hash.startsWith("#invite=")) return;
+  const code = decodeURIComponent(location.hash.slice(8));
+  if (code) {
+    elements.batchOfferInput.value = code;
+    appendMessage("system", null, "已从邀请链接读取邀请包。请选择主机分配给你的名额编号。");
+  }
+  history.replaceState(null, "", location.pathname + location.search);
+})();
+
 async function copyValue(value, label, quietWhenEmpty) {
   if (!value) {
     if (!quietWhenEmpty) appendMessage("system", null, label + "还没有生成");
@@ -780,6 +1184,39 @@ elements.loadHistory.addEventListener("click", loadHistory);
 elements.clearHistory.addEventListener("click", clearHistory);
 elements.saveNetwork.addEventListener("click", saveNetworkSettings);
 elements.roomSecret.addEventListener("input", updateCryptoState);
+elements.attachButton.addEventListener("click", function() {
+  elements.fileInput.click();
+});
+
+elements.fileInput.addEventListener("change", async function() {
+  const file = elements.fileInput.files[0];
+  elements.fileInput.value = "";
+  await sendFile(file);
+});
+
+const EMOJIS = ["😀","😂","🥲","😍","🤔","😴","👍","🙏","🎉","❤️","🔥","✅","😭","😅","🤝","👀","🚀","🍕"];
+for (const emoji of EMOJIS) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = emoji;
+  button.addEventListener("click", function() {
+    elements.messageInput.value += emoji;
+    elements.emojiPanel.hidden = true;
+    elements.messageInput.focus();
+  });
+  elements.emojiPanel.append(button);
+}
+
+elements.emojiButton.addEventListener("click", function() {
+  event.stopPropagation();
+  elements.emojiPanel.hidden = !elements.emojiPanel.hidden;
+});
+
+document.addEventListener("click", function(event) {
+  if (!elements.emojiPanel.hidden && !elements.emojiPanel.contains(event.target)) {
+    elements.emojiPanel.hidden = true;
+  }
+});
 
 elements.messageForm.addEventListener("submit", async function(event) {
   event.preventDefault();
@@ -800,7 +1237,6 @@ elements.messageForm.addEventListener("submit", async function(event) {
   if (!delivered) return;
   appendMessage("self", localIdentity.name + "（我）", text);
   elements.messageInput.value = "";
-  elements.messageInput.focus();
 });
 
 elements.disconnect.addEventListener("click", function() {

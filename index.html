@@ -3,138 +3,123 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MeshTalk · 加密去中心化群聊</title>
+  <title>MeshTalk · 加密群聊</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <div class="app-shell">
-    <header class="app-header">
-      <div class="brand">
-        <span class="brand-mark">◈</span>
-        <div>
-          <h1>MeshTalk</h1>
-          <p>浏览器点对点加密群聊 · 消息不经过中心服务器</p>
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <div class="brand">
+          <span class="brand-mark">M</span>
+          <strong>MeshTalk</strong>
         </div>
-      </div>
-      <button id="helpButton" class="ghost-button" type="button">使用说明</button>
-    </header>
+        <button id="helpButton" class="icon-button" type="button">?</button>
+      </header>
 
-    <section class="connection-panel">
-      <div class="panel-heading">
-        <h2>身份与安全</h2>
-        <span id="connectionStatus" class="status-chip offline">离线</span>
-      </div>
-
-      <div class="settings-grid">
+      <section class="side-block profile">
         <label class="field">
           <span>显示名称</span>
           <input id="displayName" maxlength="24" placeholder="匿名访客" autocomplete="nickname">
         </label>
-
         <label class="field">
           <span>房间密钥（E2EE）</span>
-          <input id="roomSecret" type="password" maxlength="128" placeholder="双方输入同一个私密口令" autocomplete="off">
+          <input id="roomSecret" type="password" maxlength="128" placeholder="成员输入同一口令" autocomplete="off">
         </label>
+        <div class="security-row">
+          <span id="encryptionStatus" class="security-chip disabled">加密未启用</span>
+          <button id="saveNetworkButton" class="text-button" type="button">保存网络</button>
+        </div>
+      </section>
 
-        <label class="field">
-          <span>TURN 服务器（可选）</span>
-          <input id="turnUrls" placeholder="turn:your-server:3478" autocomplete="off">
-        </label>
-
+      <details class="side-block network" open>
+        <summary>高级网络设置</summary>
+        <label class="field"><span>TURN 服务器</span><input id="turnUrls" placeholder="turn:your-server:3478"></label>
         <div class="field-pair">
-          <label class="field">
-            <span>TURN 用户名</span>
-            <input id="turnUsername" autocomplete="off">
-          </label>
-          <label class="field">
-            <span>TURN 密码</span>
-            <input id="turnCredential" type="password" autocomplete="off">
-          </label>
+          <label class="field"><span>用户名</span><input id="turnUsername"></label>
+          <label class="field"><span>密码</span><input id="turnCredential" type="password"></label>
         </div>
-      </div>
+      </details>
 
-      <div class="security-row">
-        <span id="encryptionStatus" class="security-chip disabled">应用层加密未启用</span>
-        <button id="saveNetworkButton" class="secondary-button compact" type="button">保存网络设置</button>
-      </div>
-    </section>
+      <section class="side-block">
+        <h2>批量房间邀请</h2>
+        <label class="field inline-field">
+          <span>名额</span><input id="batchSeats" type="number" min="2" max="8" value="3">
+        </label>
+        <button id="createBatchButton" class="primary-button" type="button">生成批量邀请包</button>
+        <textarea id="batchOfferOutput" rows="4" readonly placeholder="邀请包"></textarea>
+        <button id="copyBatchLinkButton" class="primary-button outline" type="button">生成邀请链接并复制</button>
+        <button id="copyBatchOfferButton" class="text-button" type="button">复制原始邀请包</button>
+        <label class="field"><span>成员粘贴邀请包</span><textarea id="batchOfferInput" rows="4" placeholder="粘贴主机邀请包"></textarea></label>
+        <label class="field inline-field"><span>名额编号</span><input id="batchSeatNumber" type="number" min="1" max="8" value="1"></label>
+        <button id="acceptBatchButton" class="primary-button outline" type="button">生成回复包</button>
+        <textarea id="batchAnswerOutput" rows="4" readonly placeholder="回复包"></textarea>
+        <button id="copyBatchAnswerButton" class="text-button" type="button">复制回复包</button>
+        <label class="field host-only"><span>主机粘贴回复包（每行一条）</span><textarea id="batchAnswerInput" rows="5" placeholder="每行一个回复包"></textarea></label>
+        <button id="completeBatchButton" class="success-button" type="button">批量连接成员</button>
+      </section>
 
-    <section class="connect-panel">
-      <div class="connect-grid">
-        <article class="connect-card">
-          <h3>邀请新成员</h3>
-          <p>每点击一次生成一条新邀请码；可分别发给不同成员。</p>
-          <button id="createOfferButton" type="button">创建邀请码并复制</button>
-          <textarea id="offerOutput" rows="5" readonly placeholder="最新邀请码会显示在这里"></textarea>
-        </article>
+      <details class="side-block manual-connect">
+        <summary>单人邀请码</summary>
+        <article><h3>邀请新成员</h3><button id="createOfferButton" class="primary-button" type="button">创建邀请码</button><textarea id="offerOutput" rows="3" readonly></textarea></article>
+        <article><h3>加入房间</h3><textarea id="offerInput" rows="3" placeholder="粘贴邀请码"></textarea><button id="acceptOfferButton" class="primary-button" type="button">生成回复码</button><textarea id="answerOutput" rows="3" readonly></textarea></article>
+        <article><h3>完成连接</h3><textarea id="answerInput" rows="3" placeholder="粘贴回复码"></textarea><button id="completeConnectionButton" class="success-button" type="button">连接对方</button></article>
+      </details>
 
-        <article class="connect-card">
-          <h3>加入群聊</h3>
-          <p>粘贴收到的邀请码并生成回复码。</p>
-          <textarea id="offerInput" rows="5" placeholder="粘贴对方的邀请码"></textarea>
-          <button id="acceptOfferButton" type="button">生成回复码并复制</button>
-          <textarea id="answerOutput" rows="5" readonly placeholder="最新回复码会显示在这里"></textarea>
-        </article>
+      <section class="member-panel">
+        <h2>网络状态</h2>
+        <ul id="memberList" class="member-list"></ul>
+        <div id="pendingConnections" class="pending-list"></div>
+        <div id="invitationPanel" class="invitation-panel">
+          <h3>邀请记录</h3>
+          <div id="invitationList" class="invitation-list"></div>
+        </div>
+      </section>
+    </aside>
 
-        <article class="connect-card">
-          <h3>完成连接</h3>
-          <p>发起方粘贴对应成员的回复码。</p>
-          <textarea id="answerInput" rows="8" placeholder="粘贴成员发来的回复码"></textarea>
-          <button id="completeConnectionButton" type="button">连接对方</button>
-        </article>
-      </div>
-
-      <div id="invitationPanel" class="invitation-panel">
-        <h3>邀请配对记录</h3>
-        <div id="invitationList" class="invitation-list"><p class="empty">暂无记录。生成邀请码后会在这里按目标节点保存。</p></div>
-      </div>
-    </section>
-
-    <section class="chat-panel">
-      <div class="chat-header">
-        <h2>聊天室</h2>
+    <main class="chat-panel">
+      <header class="chat-header">
+        <div class="chat-title">
+          <span class="chat-avatar">◈</span>
+          <div>
+            <h1>MeshTalk 群聊</h1>
+            <p><span id="connectionStatus">离线</span> · <span id="memberCountLabel">1 人</span> · <span id="latencyLabel">— ms</span></p>
+          </div>
+        </div>
         <div class="connection-actions">
-          <button id="historyButton" class="ghost-button compact" type="button">本地记录</button>
-          <span id="latencyLabel" class="latency">— ms</span>
-          <span id="memberCountLabel" class="latency">1 人</span>
-          <button id="disconnectButton" class="danger-button" type="button">全部断开</button>
+          <button id="historyButton" class="icon-button wide" type="button">记录</button>
+          <button id="disconnectButton" class="icon-button danger" type="button">断开</button>
         </div>
-      </div>
+      </header>
       <ol id="messageList" class="message-list"></ol>
       <form id="messageForm" class="composer">
-        <input id="messageInput" maxlength="2000" placeholder="输入加密消息..." autocomplete="off" disabled>
-        <button id="sendButton" type="submit" disabled>发送</button>
+        <div id="emojiPanel" class="emoji-panel" hidden></div>
+        <input id="messageInput" maxlength="2000" placeholder="Write a message..." autocomplete="off" disabled>
+        <div class="composer-actions">
+          <button id="emojiButton" class="icon-button" type="button" title="表情">☺</button>
+          <button id="attachButton" class="icon-button" type="button" title="发送图片或文件">＋</button>
+          <button id="sendButton" type="submit" disabled aria-label="发送">➤</button>
+        </div>
+        <input id="fileInput" type="file" hidden>
       </form>
-    </section>
-
-    <dialog id="historyDialog">
-      <h2>本地聊天记录</h2>
-      <p>记录以当前房间密钥派生出的指纹隔离保存，只保留在本机浏览器。切换或清空密钥不会显示其他房间的明文记录。</p>
-      <div class="history-actions">
-        <button id="loadHistoryButton" class="secondary-button compact" type="button">加载最近 200 条</button>
-        <button id="clearHistoryButton" class="danger-button" type="button">清空当前房间</button>
-      </div>
-      <ol id="historyList" class="message-list history-list"></ol>
-      <form method="dialog"><button class="primary-button">关闭</button></form>
-    </dialog>
-
-    <aside class="member-panel">
-      <h3>网络状态</h3>
-      <ul id="memberList" class="member-list"></ul>
-      <div id="pendingConnections" class="pending-list"></div>
-    </aside>
+    </main>
   </div>
 
+  <dialog id="historyDialog">
+    <h2>本地聊天记录</h2>
+    <p>记录按房间密钥指纹隔离，只保存在本机。</p>
+    <div class="history-actions">
+      <button id="loadHistoryButton" class="text-button" type="button">加载 200 条</button>
+      <button id="clearHistoryButton" class="icon-button danger" type="button">清空当前房间</button>
+    </div>
+    <ol id="historyList" class="message-list history-list"></ol>
+    <form method="dialog"><button class="primary-button">关闭</button></form>
+  </dialog>
+
   <dialog id="helpDialog">
-    <h2>推荐的三人群聊流程</h2>
-    <ol>
-      <li>所有成员打开同一页面，设置名称并输入相同的房间密钥。</li>
-      <li>A 点击两次「创建邀请码」，分别发给 B、C。</li>
-      <li>B/C 粘贴各自邀请码生成回复码，再发回 A。</li>
-      <li>A 分别粘贴回复码并点击「连接对方」。</li>
-      <li>如需更稳定网络，B/C 之间也互相交换邀请码。</li>
-    </ol>
-    <p>WebRTC 本身使用 DTLS 加密。设置相同房间密钥后，消息内容还会额外使用 PBKDF2 + AES-GCM 做应用层端到端加密。请通过可信渠道把房间密钥告诉成员。</p>
+    <h2>批量连接流程</h2>
+    <ol><li>A 生成批量邀请包并发出。</li><li>B/C 分别选择不同名额编号。</li><li>B/C 将回复包发回 A。</li><li>A 每行粘贴一个回复包后批量连接。</li></ol>
+    <p>相同房间密钥会启用 AES-GCM 应用层端到端加密；WebRTC 连接另有 DTLS 加密。</p>
     <form method="dialog"><button class="primary-button">知道了</button></form>
   </dialog>
 
