@@ -3,13 +3,14 @@
 const PROTOCOL_VERSION = 4;
 const MAX_MESSAGE_CACHE = 1500;
 const SEND_LIMIT = { count: 8, windowMs: 10000 };
-const RECEIVE_LIMIT = { count: 30, windowMs: 10000 };
+const RECEIVE_LIMIT = { count: 120, windowMs: 10000 };
 const MAX_DIRECT_SESSIONS = 12;
 const MAX_FILE_SIZE = 12 * 1024 * 1024;
 const FILE_CHUNK_SIZE = 48 * 1024;
 const CHUNK_ACK_INTERVAL = 8;
 const CHUNK_RETRY_LIMIT = 5;
 const TYPING_TIMEOUT_MS = 3000;
+const MAX_VOICE_DURATION_MS = 2 * 60 * 1000;
 const BASE_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" }
@@ -57,8 +58,11 @@ const elements = {
   emojiPanel: document.querySelector("#emojiPanel"),
   attachButton: document.querySelector("#attachButton"),
   fileInput: document.querySelector("#fileInput"),
+  voiceButton: document.querySelector("#voiceButton"),
   mobileBackButton: document.querySelector("#mobileBackButton")
 };
+
+elements.sidebarToggle = document.querySelector("#sidebarToggleButton");
 
 elements.historyButton = document.querySelector("#historyButton");
 elements.historyDialog = document.querySelector("#historyDialog");
@@ -73,6 +77,12 @@ const incomingFiles = new Map();
 const outgoingFiles = new Map();
 const messageReceipts = new Map();
 const typingPeers = new Set();
+let voiceRecorder = null;
+let voiceStream = null;
+let voiceChunks = [];
+let voiceTimer = null;
+let voiceRecordingStartedAt = 0;
+let voiceShouldSend = false;
 
 elements.linkNote = document.createElement("p");
 elements.linkNote.className = "link-note hidden";
@@ -459,6 +469,10 @@ elements.mobileBackButton.addEventListener("click", function() {
   const shell = document.querySelector(".app-shell");
   shell.classList.remove("show-chat");
   shell.classList.add("show-sidebar");
+});
+
+elements.sidebarToggle.addEventListener("click", function() {
+  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed");
 });
 
 function appendMember(name) {
@@ -848,9 +862,17 @@ function createFileBubble(kind, sender, file) {
   return { item, bubble, bar };
 }
 
-async function appendCompletedFile(kind, sender, file, blob) {
-  const isImage = String(file.type || "").startsWith("image/");
+async function appendCompletedFile(kind, sender, file, blob, durationMs = 0) {
+  const fileType = String(file.type || "");
+  const isImage = fileType.startsWith("image/");
+  const isVoice = isVoiceFile(file);
   const view = createFileBubble(kind, sender, { name: file.name, size: file.size });
+  view.bubble.classList.toggle("voice-bubble", isVoice);
+  if (isVoice) {
+    view.bubble.querySelector(".file-name").remove();
+    view.bubble.querySelector(".file-size").remove();
+    view.bubble.prepend(createVoiceBadge(durationMs || file.durationMs));
+  }
   view.bubble.querySelector(".progress-track").remove();
   const url = URL.createObjectURL(blob);
   if (isImage) {
@@ -860,6 +882,13 @@ async function appendCompletedFile(kind, sender, file, blob) {
     image.alt = safeText(file.name, 80);
     image.addEventListener("click", function() { window.open(url, "_blank"); });
     view.bubble.prepend(image);
+  } else if (isVoice || fileType.startsWith("audio/")) {
+    const audio = document.createElement("audio");
+    audio.className = "voice-player";
+    audio.controls = true;
+    audio.preload = "metadata";
+    audio.src = url;
+    view.bubble.append(audio);
   } else {
     const link = document.createElement("a");
     link.className = "download-link";
@@ -871,7 +900,7 @@ async function appendCompletedFile(kind, sender, file, blob) {
   saveHistory(kind, sender, "[文件] " + safeText(file.name, 80));
 }
 
-async function sendFile(file) {
+async function sendFile(file, durationMs) {
   ensureLocalIdentity();
   if (!file || !connectedSessions().length) return;
   if (file.size > MAX_FILE_SIZE) {
@@ -909,7 +938,7 @@ async function sendFile(file) {
   }
   await broadcastAsync({ type: "file-end", transferId });
   const blob = new Blob([bytes], { type: safeText(file.type, 100) || "application/octet-stream" });
-  await appendCompletedFile("self", localIdentity.name + "（我）", file, blob);
+  await appendCompletedFile("self", localIdentity.name + "（我）", file, blob, durationMs);
 }
 
 async function waitUntilBufferDrained() {
@@ -951,6 +980,101 @@ function broadcastAsync(envelope) {
   const jobs = [];
   sessions.forEach(function(session) { jobs.push(sendTo(session, envelope)); });
   return Promise.all(jobs).then(function() {});
+}
+
+function isVoiceFile(file) {
+  return /^voice-[0-9]+-[a-z0-9]+\.webm$/i.test(String(file.name || ""));
+}
+
+function createVoiceBadge(durationMs = 0) {
+  const badge = document.createElement("span");
+  badge.className = "voice-badge";
+  badge.textContent = "🎙️ 语音消息 · " + formatDuration(Number(durationMs));
+  return badge;
+}
+
+async function toggleVoiceRecording() {
+  if (voiceRecorder && voiceRecorder.state !== "inactive") {
+    stopVoiceRecording(true);
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    appendMessage("error", null, "当前浏览器不支持录音。");
+    return;
+  }
+  try {
+    ensureLocalIdentity();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(function(type) {
+      return MediaRecorder.isTypeSupported(type);
+    });
+    if (!mimeType) throw new Error("unsupported");
+    voiceChunks = [];
+    voiceShouldSend = false;
+    voiceRecordingStartedAt = Date.now();
+    voiceStream = stream;
+    voiceRecorder = new MediaRecorder(stream, { mimeType });
+    voiceRecorder.addEventListener("dataavailable", function(event) {
+      if (event.data.size) voiceChunks.push(event.data);
+    });
+    voiceRecorder.addEventListener("stop", sendVoiceRecording);
+    voiceTimer = setTimeout(function() {
+      if (voiceRecorder && voiceRecorder.state === "recording") stopVoiceRecording(true);
+    }, MAX_VOICE_DURATION_MS);
+    voiceRecorder.start(250);
+    elements.voiceButton.textContent = "⏹";
+    elements.voiceButton.title = "停止并发送语音";
+    elements.voiceButton.classList.add("recording");
+    appendMessage("system", null, "正在录制语音，最长 2 分钟。再次点击按钮结束并发送。");
+  } catch (error) {
+    cleanupVoiceRecording(false);
+    appendMessage("error", null, error.name === "NotAllowedError" ? "麦克风权限被拒绝。" : "无法启动录音，请检查麦克风设备。");
+  }
+}
+
+function stopVoiceRecording(send) {
+  if (!voiceRecorder || voiceRecorder.state === "inactive") return;
+  voiceShouldSend = Boolean(send);
+  clearTimeout(voiceTimer);
+  voiceTimer = null;
+  if (voiceRecorder.state === "paused") voiceRecorder.resume();
+  voiceRecorder.stop();
+}
+
+async function sendVoiceRecording() {
+  const durationMs = Date.now() - (voiceRecordingStartedAt || Date.now());
+  const chunks = voiceChunks.slice();
+  const type = voiceRecorder?.mimeType || "audio/webm";
+  cleanupVoiceRecording(true);
+  if (!connectedSessions().length) {
+    appendMessage("error", null, "请先连接成员后再发送语音。");
+    return;
+  }
+  if (!voiceShouldSend || !chunks.length) return;
+  try {
+    await sendFile(new File(chunks, "voice-" + Date.now() + "-" + randomId().slice(0, 8) + ".webm", { type }), durationMs);
+  } catch {
+    appendMessage("error", null, "语音发送失败，请重试。");
+  }
+}
+
+function cleanupVoiceRecording(resetSendState) {
+  clearTimeout(voiceTimer);
+  voiceTimer = null;
+  if (voiceStream) voiceStream.getTracks().forEach(function(track) { track.stop(); });
+  voiceStream = null;
+  voiceRecorder = null;
+  voiceChunks = [];
+  voiceRecordingStartedAt = 0;
+  if (resetSendState) voiceShouldSend = false;
+  elements.voiceButton.textContent = "🎙️";
+  elements.voiceButton.title = "录制语音消息";
+  elements.voiceButton.classList.remove("recording");
+}
+
+function formatDuration(durationMs) {
+  const totalSeconds = Math.max(1, Math.round((Number(durationMs) || 0) / 1000));
+  return Math.floor(totalSeconds / 60) + ":" + String(totalSeconds % 60).padStart(2, "0");
 }
 
 async function receiveFileChunk(envelope) {
@@ -1258,6 +1382,10 @@ elements.fileInput.addEventListener("change", async function() {
   const file = elements.fileInput.files[0];
   elements.fileInput.value = "";
   await sendFile(file);
+});
+
+elements.voiceButton.addEventListener("click", function() {
+  toggleVoiceRecording();
 });
 
 const EMOJIS = ["😀","😂","🥲","😍","🤔","😴","👍","🙏","🎉","❤️","🔥","✅","😭","😅","🤝","👀","🚀","🍕"];

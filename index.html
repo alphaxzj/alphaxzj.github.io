@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#ffffff">
   <title>MeshTalk · 加密群聊</title>
-  <link rel="stylesheet" href="./styles.css?v=5">
+  <link rel="stylesheet" href="./styles.css?v=10">
 </head>
 <body>
   <div class="app-shell">
@@ -15,10 +15,14 @@
           <span class="brand-mark">M</span>
           <strong>MeshTalk</strong>
         </div>
-        <button id="helpButton" class="icon-button" type="button">?</button>
+        <div class="header-actions">
+          <button id="sidebarToggleButton" class="icon-button" type="button" title="收起/展开侧栏">⟨</button>
+          <button id="helpButton" class="icon-button" type="button">?</button>
+        </div>
       </header>
 
-      <section class="side-block profile">
+      <details class="side-block collapsible profile" open>
+        <summary>身份与安全<span class="summary-arrow">▾</span></summary>
         <label class="field">
           <span>显示名称</span>
           <input id="displayName" maxlength="24" placeholder="匿名访客" autocomplete="nickname">
@@ -31,10 +35,10 @@
           <span id="encryptionStatus" class="security-chip disabled">加密未启用</span>
           <button id="saveNetworkButton" class="text-button" type="button">保存网络</button>
         </div>
-      </section>
+      </details>
 
-      <details class="side-block network" open>
-        <summary>高级网络设置</summary>
+      <details class="side-block collapsible network">
+        <summary>高级网络设置<span class="summary-arrow">▾</span></summary>
         <label class="field"><span>TURN 服务器</span><input id="turnUrls" placeholder="turn:your-server:3478"></label>
         <div class="field-pair">
           <label class="field"><span>用户名</span><input id="turnUsername"></label>
@@ -42,8 +46,8 @@
         </div>
       </details>
 
-      <section class="side-block">
-        <h2>批量房间邀请</h2>
+      <details class="side-block collapsible batch-invite" open>
+        <summary>批量房间邀请<span class="summary-arrow">▾</span></summary>
         <label class="field inline-field">
           <span>名额</span><input id="batchSeats" type="number" min="2" max="8" value="3">
         </label>
@@ -58,24 +62,24 @@
         <button id="copyBatchAnswerButton" class="text-button" type="button">复制回复包</button>
         <label class="field host-only"><span>主机粘贴回复包（每行一条）</span><textarea id="batchAnswerInput" rows="5" placeholder="每行一个回复包"></textarea></label>
         <button id="completeBatchButton" class="success-button" type="button">批量连接成员</button>
-      </section>
+      </details>
 
-      <details class="side-block manual-connect">
-        <summary>单人邀请码</summary>
+      <details class="side-block collapsible manual-connect">
+        <summary>单人邀请码<span class="summary-arrow">▾</span></summary>
         <article><h3>邀请新成员</h3><button id="createOfferButton" class="primary-button" type="button">创建邀请码</button><textarea id="offerOutput" rows="3" readonly></textarea></article>
         <article><h3>加入房间</h3><textarea id="offerInput" rows="3" placeholder="粘贴邀请码"></textarea><button id="acceptOfferButton" class="primary-button" type="button">生成回复码</button><textarea id="answerOutput" rows="3" readonly></textarea></article>
         <article><h3>完成连接</h3><textarea id="answerInput" rows="3" placeholder="粘贴回复码"></textarea><button id="completeConnectionButton" class="success-button" type="button">连接对方</button></article>
       </details>
 
-      <section class="member-panel">
-        <h2>网络状态</h2>
+      <details class="collapsible member-panel" open>
+        <summary>网络状态<span class="summary-arrow">▾</span></summary>
         <ul id="memberList" class="member-list"></ul>
         <div id="pendingConnections" class="pending-list"></div>
         <div id="invitationPanel" class="invitation-panel">
           <h3>邀请记录</h3>
           <div id="invitationList" class="invitation-list"></div>
         </div>
-      </section>
+      </details>
     </aside>
 
     <main class="chat-panel">
@@ -100,6 +104,7 @@
         <div class="composer-actions">
           <button id="emojiButton" class="icon-button" type="button" title="表情">☺</button>
           <button id="attachButton" class="icon-button" type="button" title="发送图片或文件">＋</button>
+          <button id="voiceButton" class="icon-button voice-button" type="button" title="录制语音消息">🎙️</button>
           <button id="sendButton" type="submit" disabled aria-label="发送">➤</button>
         </div>
         <input id="fileInput" type="file" hidden>
@@ -125,6 +130,6 @@
     <form method="dialog"><button class="primary-button">知道了</button></form>
   </dialog>
 
-  <script src="./app.js?v=5"></script>
+  <script src="./app.js?v=10"></script>
 </body>
 </html>
