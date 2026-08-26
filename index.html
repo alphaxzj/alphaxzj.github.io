@@ -94,6 +94,7 @@
       <div class="chat-header">
         <h2>聊天室</h2>
         <div class="connection-actions">
+          <button id="historyButton" class="ghost-button compact" type="button">本地记录</button>
           <span id="latencyLabel" class="latency">— ms</span>
           <span id="memberCountLabel" class="latency">1 人</span>
           <button id="disconnectButton" class="danger-button" type="button">全部断开</button>
@@ -105,6 +106,17 @@
         <button id="sendButton" type="submit" disabled>发送</button>
       </form>
     </section>
+
+    <dialog id="historyDialog">
+      <h2>本地聊天记录</h2>
+      <p>记录以当前房间密钥派生出的指纹隔离保存，只保留在本机浏览器。切换或清空密钥不会显示其他房间的明文记录。</p>
+      <div class="history-actions">
+        <button id="loadHistoryButton" class="secondary-button compact" type="button">加载最近 200 条</button>
+        <button id="clearHistoryButton" class="danger-button" type="button">清空当前房间</button>
+      </div>
+      <ol id="historyList" class="message-list history-list"></ol>
+      <form method="dialog"><button class="primary-button">关闭</button></form>
+    </dialog>
 
     <aside class="member-panel">
       <h3>网络状态</h3>

@@ -1,7 +1,10 @@
 "use strict";
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const MAX_MESSAGE_CACHE = 1500;
+const SEND_LIMIT = { count: 8, windowMs: 10000 };
+const RECEIVE_LIMIT = { count: 30, windowMs: 10000 };
+const MAX_DIRECT_SESSIONS = 12;
 const BASE_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" }
@@ -35,12 +38,23 @@ const elements = {
   sendButton: document.querySelector("#sendButton")
 };
 
+elements.historyButton = document.querySelector("#historyButton");
+elements.historyDialog = document.querySelector("#historyDialog");
+elements.historyList = document.querySelector("#historyList");
+elements.loadHistory = document.querySelector("#loadHistoryButton");
+elements.clearHistory = document.querySelector("#clearHistoryButton");
+
 const sessions = new Map();
 const invitations = new Map();
 const seenMessages = new Set();
 let localIdentity = null;
 let heartbeatTimer = null;
 let cryptoKey = null;
+let database = null;
+let roomFingerprint = "";
+let knownPeers = new Map();
+const sendTimestamps = [];
+const receiveTimestamps = [];
 
 function randomId() {
   const bytes = new Uint8Array(8);
@@ -137,9 +151,12 @@ function updateCryptoState() {
     elements.encryptionStatus.className = "security-chip disabled";
     return Promise.resolve(false);
   }
-  return deriveKey(secret).then(function(key) {
+  return deriveKey(secret).then(async function(key) {
     const wasEnabled = Boolean(cryptoKey);
     cryptoKey = key;
+    roomFingerprint = await fingerprintSecret(secret);
+    await openHistoryDatabase();
+    refreshInterface();
     elements.encryptionStatus.textContent = "应用层 AES-256-GCM 已启用";
     elements.encryptionStatus.className = "security-chip enabled";
     if (!wasEnabled) appendMessage("system", null, "应用层端到端加密已启用。");
@@ -151,6 +168,149 @@ function updateCryptoState() {
     appendMessage("error", null, "密钥派生失败：" + error.message);
     return false;
   });
+}
+
+async function fingerprintSecret(secret) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("room:" + secret));
+  return Array.from(new Uint8Array(digest).slice(0, 16), function(byte) {
+    return byte.toString(16).padStart(2, "0");
+  }).join("");
+}
+
+async function openHistoryDatabase() {
+  if (!window.indexedDB) {
+    database = null;
+    appendMessage("system", null, "当前浏览器不支持 IndexedDB，本地历史记录不可用。");
+    return;
+  }
+  if (database) return;
+  database = await new Promise(function(resolve, reject) {
+    const request = indexedDB.open("MeshTalk", 1);
+    request.onupgradeneeded = function() {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("messages")) {
+        const store = database.createObjectStore("messages", { keyPath: "id", autoIncrement: true });
+        store.createIndex("time", "time");
+      }
+    };
+    request.onsuccess = function() { resolve(request.result); };
+    request.onerror = function() { reject(request.error); };
+  }).catch(function(error) {
+    database = null;
+    appendMessage("error", null, "打开本地记录失败：" + error.message);
+  });
+}
+
+async function saveHistory(kind, sender, text, messageId) {
+  if (!database || !roomFingerprint || !text || kind === "system" || kind === "error") return;
+  try {
+    database.transaction(["messages"], "readwrite").objectStore("messages").add({
+      roomId: roomFingerprint,
+      kind: kind,
+      sender: safeText(sender, 24),
+      text: safeText(text, 2000),
+      messageId: safeText(messageId, 64),
+      time: Date.now()
+    });
+  } catch {}
+}
+
+async function loadHistory() {
+  elements.historyList.innerHTML = "";
+  if (!database) {
+    appendMessage("system", null, "本地记录数据库不可用。");
+    return;
+  }
+  const records = await new Promise(function(resolve, reject) {
+    const index = database.transaction(["messages"]).objectStore("messages").index("time");
+    const request = index.openCursor(IDBKeyRange.lowerBound(0), "prev");
+    const output = [];
+    request.onsuccess = function(event) {
+      const cursor = event.target.result;
+      if (!cursor || output.length >= 200) return resolve(output);
+      if (cursor.value.roomId === roomFingerprint && cursor.value.text) output.unshift(cursor.value);
+      cursor.continue();
+    };
+    request.onerror = function() { reject(request.error); };
+  });
+  for (const record of records) {
+    appendMessageTo(record.kind === "self" ? elements.historyList : elements.historyList, record.kind, record.sender, record.text);
+  }
+  if (!records.length) {
+    appendMessageTo(elements.historyList, "system", null, "当前房间暂无本地记录。");
+  }
+}
+
+async function clearHistory() {
+  if (!database) return;
+  await new Promise(function(resolve, reject) {
+    const request = database.transaction(["messages"], "readwrite").objectStore("messages").openCursor();
+    request.onsuccess = function(event) {
+      const cursor = event.target.result;
+      if (!cursor) return resolve();
+      if (cursor.value.roomId === roomFingerprint) cursor.delete();
+      cursor.continue();
+    };
+    request.onerror = function() { reject(request.error); };
+  });
+  elements.historyList.innerHTML = "";
+  appendMessageTo(elements.historyList, "system", null, "当前房间本地记录已清空。");
+  appendMessage("system", null, "当前房间本地记录已清空。");
+}
+
+function withinSendLimit() {
+  const now = Date.now();
+  while (sendTimestamps.length && now - sendTimestamps[0] > SEND_LIMIT.windowMs) sendTimestamps.shift();
+  if (sendTimestamps.length >= SEND_LIMIT.count) return false;
+  sendTimestamps.push(now);
+  return true;
+}
+
+function withinReceiveLimit(session) {
+  const now = Date.now();
+  while (receiveTimestamps.length && now - receiveTimestamps[0] > RECEIVE_LIMIT.windowMs) receiveTimestamps.shift();
+  if (receiveTimestamps.length >= RECEIVE_LIMIT.count) {
+    session.rateLimited = true;
+    closeSession(session);
+    appendMessage("error", null, "对端消息频率异常，连接已断开。");
+    return false;
+  }
+  receiveTimestamps.push(now);
+  return true;
+}
+
+function peerDirectoryEnvelope() {
+  const peers = [];
+  connectedSessions().forEach(function(session) {
+    peers.push({ id: session.targetId, name: session.name });
+  });
+  knownPeers.forEach(function(peer) {
+    peers.push(peer);
+  });
+  return {
+    type: "directory",
+    senderId: localIdentity.id,
+    peers: peers.slice(0, MAX_DIRECT_SESSIONS)
+  };
+}
+
+function mergeDirectory(peers) {
+  let changed = false;
+  for (const rawPeer of Array.isArray(peers) ? peers : []) {
+    const id = safeText(rawPeer.id, 32);
+    const name = safeText(rawPeer.name, 24) || "未知节点";
+    if (!id || id === localIdentity.id || sessions.has(id)) continue;
+    if (!knownPeers.has(id)) {
+      knownPeers.set(id, { id, name });
+      changed = true;
+    } else if (knownPeers.get(id).name !== name) {
+      knownPeers.set(id, { id, name });
+      changed = true;
+    }
+  }
+  if (changed) {
+    broadcast(peerDirectoryEnvelope(), null);
+  }
 }
 
 function saveNetworkSettings() {
@@ -268,6 +428,7 @@ function appendMember(name) {
 }
 
 function appendMessage(kind, sender, body) {
+  if (kind === "self" || kind === "remote") saveHistory(kind, sender, body);
   const item = document.createElement("li");
   if (kind === "system" || kind === "error") {
     item.className = kind + "-message";
@@ -284,6 +445,16 @@ function appendMessage(kind, sender, body) {
   }
   elements.messageList.append(item);
   elements.messageList.scrollTop = elements.messageList.scrollHeight;
+}
+
+function appendMessageTo(target, kind, sender, body) {
+  const originalTarget = elements.messageList;
+  elements.messageList = target;
+  try {
+    appendMessage(kind, sender, body);
+  } finally {
+    elements.messageList = originalTarget;
+  }
 }
 
 async function compressedJson(payload) {
@@ -355,12 +526,15 @@ function bindChannel(session, channel) {
     session.state = "connected";
     appendMessage("system", null, "已加入群聊网络：节点 " + session.targetId.slice(0, 6));
     sendTo(session, helloEnvelope());
+    setTimeout(function() {
+      sendTo(session, peerDirectoryEnvelope());
+    }, 120);
     refreshInterface();
   });
 
-  channel.addEventListener("message", function(event) {
+channel.addEventListener("message", function(event) {
     decryptJson(JSON.parse(event.data)).then(function(envelope) {
-      handleEnvelope(session, envelope);
+      if (withinReceiveLimit(session)) handleEnvelope(session, envelope);
     }).catch(function() {
       appendMessage("error", null, "收到无法解密或解析的数据包。请确认使用相同房间密钥。");
     });
@@ -434,6 +608,7 @@ function handleEnvelope(session, envelope) {
   if (!envelope || typeof envelope.type !== "string") return;
 
   if (envelope.type === "hello") {
+    const previousName = session.name;
     session.name = safeText(envelope.senderName, 24) || "未知节点";
     const invitation = invitations.get(session.targetId);
     if (invitation && invitation.state !== "connected") {
@@ -441,7 +616,14 @@ function handleEnvelope(session, envelope) {
       invitation.state = "connected";
     }
     appendMessage("system", null, "节点身份确认：" + session.name);
+    if (previousName !== session.name) mergeDirectory([{ id: session.targetId, name: session.name }]);
+    sendTo(session, peerDirectoryEnvelope());
     refreshInterface();
+    return;
+  }
+
+  if (envelope.type === "directory") {
+    if (safeText(envelope.senderId, 32) === session.targetId) mergeDirectory(envelope.peers);
     return;
   }
 
@@ -591,6 +773,11 @@ async function copyValue(value, label, quietWhenEmpty) {
   }
 }
 
+elements.historyButton.addEventListener("click", function() {
+  elements.historyDialog.showModal();
+});
+elements.loadHistory.addEventListener("click", loadHistory);
+elements.clearHistory.addEventListener("click", clearHistory);
 elements.saveNetwork.addEventListener("click", saveNetworkSettings);
 elements.roomSecret.addEventListener("input", updateCryptoState);
 
@@ -598,9 +785,14 @@ elements.messageForm.addEventListener("submit", async function(event) {
   event.preventDefault();
   const text = elements.messageInput.value.replace(/\s+$/u, "").trim();
   if (!text || connectedSessions().length === 0) return;
+  if (!withinSendLimit()) {
+    appendMessage("error", null, "发送过于频繁，请稍后再试。");
+    return;
+  }
+  const envelopeMessageId = randomId();
   const delivered = broadcast({
     type: "chat",
-    messageId: randomId(),
+    messageId: envelopeMessageId,
     senderId: localIdentity.id,
     senderName: localIdentity.name,
     text: text
@@ -616,6 +808,41 @@ elements.disconnect.addEventListener("click", function() {
   closeAllSessions();
   appendMessage("system", null, "你已断开所有群聊连接。");
 });
+
+setInterval(function() {
+  if (connectedSessions().length > 0 && sessions.size < MAX_DIRECT_SESSIONS) autoConnectKnownPeers();
+}, 8000);
+
+async function createDirectedOffer(peerName) {
+  const targetId = randomId();
+  const session = createSession(targetId, "initiator");
+  bindChannel(session, session.connection.createDataChannel("meshtalk", { ordered: true }));
+  const offer = await session.connection.createOffer();
+  await session.connection.setLocalDescription(offer);
+  await waitForIceGathering(session.connection);
+  const code = await compressedJson({
+    v: PROTOCOL_VERSION,
+    app: "meshtalk",
+    group: true,
+    targetId,
+    identity: localIdentity,
+    sdp: session.connection.localDescription.sdp,
+    candidates: session.candidates
+  });
+  invitations.set(targetId, { name: peerName, state: "waiting" });
+  elements.offerOutput.value = code;
+  await copyValue(code, "给 " + peerName + " 的邀请码", true);
+  refreshInterface();
+}
+
+function autoConnectKnownPeers() {
+  const availableCapacity = Math.max(0, MAX_DIRECT_SESSIONS - sessions.size);
+  const candidates = Array.from(knownPeers.values()).slice(0, availableCapacity);
+  if (!candidates.length) return;
+  appendMessage("system", null, "发现可直连成员：" + candidates.map(function(peer) { return peer.name; }).join("、") + "。请生成并传递对应邀请码。");
+  candidates.forEach(function(peer) { createDirectedOffer(peer.name); });
+  knownPeers.clear();
+}
 
 document.querySelector("#helpButton").addEventListener("click", function() {
   document.querySelector("#helpDialog").showModal();
